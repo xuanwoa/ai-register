@@ -11,9 +11,6 @@ model_provider: "openai"  # 可选，与 model_providers 一致
 model_providers:
   grok:
     browser_proxy: "http://127.0.0.1:7890"
-    api_endpoint: ""
-    api_token: ""
-    api_append: true
   openai:
     # 一般不修改
     enable_oauth: true
@@ -40,3 +37,10 @@ cpa:
   enable: false
   api_url: "http://localhost:8317/v0/management/auth-files"
   token: "<YOUR_CPA_TOKEN>"
+
+g2a:
+  # 是否上传到 grok2ai 见：https://github.com/chenyme/grok2api
+  enable: false
+  api_url: ""
+  token: ""
+  append: true

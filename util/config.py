@@ -11,9 +11,6 @@ REGISTER_CONFIG_DEFAULTS = {
     "model_providers": {
         "grok": {
             "browser_proxy": "",
-            "api_endpoint": "",
-            "api_token": "",
-            "api_append": True,
         },
         "openai": {
             "enable_oauth": True,
@@ -37,6 +34,12 @@ REGISTER_CONFIG_DEFAULTS = {
         "api_url": "",
         "token": "",
     },
+    "g2a": {
+        "enable": False,
+        "api_url": "",
+        "token": "",
+        "append": True,
+    },
 }
 
 
@@ -56,6 +59,9 @@ REGISTER_ENV_KEY_MAPPING = {
     "cpa_enable": "CPA_ENABLE",
     "cpa_api_url": "CPA_API_URL",
     "cpa_token": "CPA_TOKEN",
+    "g2a_enable": "G2A_ENABLE",
+    "g2a_api_url": "G2A_API_URL",
+    "g2a_token": "G2A_TOKEN",
 }
 
 
@@ -184,6 +190,25 @@ def load_register_config(config_path, logger=None):
         "enable": parse_bool(cpa_enable_raw, False),
         "api_url": str(cpa_api_url).strip(),
         "token": str(cpa_token).strip(),
+    }
+
+    g2a_cfg = config.get("g2a")
+    if not isinstance(g2a_cfg, dict):
+        g2a_cfg = {}
+
+    g2a_enable_raw = (
+        config.get("g2a_enable")
+        if config.get("g2a_enable") is not None
+        else g2a_cfg.get("enable", False)
+    )
+    g2a_api_url = config.get("g2a_api_url") or g2a_cfg.get("api_url") or ""
+    g2a_token = config.get("g2a_token") or g2a_cfg.get("token") or ""
+    g2a_append_raw = g2a_cfg.get("append", True)
+    config["g2a"] = {
+        "enable": parse_bool(g2a_enable_raw, False),
+        "api_url": str(g2a_api_url).strip(),
+        "token": str(g2a_token).strip(),
+        "append": parse_bool(g2a_append_raw, True),
     }
 
     # 规范化 Token 存储目录。

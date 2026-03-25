@@ -11,13 +11,12 @@ import time
 from glob import glob
 from typing import Optional
 
-import requests
 from DrissionPage import Chromium, ChromiumOptions
 from DrissionPage.errors import PageDisconnectedError
 
 from register.base import ModelProvider
 from util import config as config_utils
-from util import cpa as cpa_utils
+from util import g2a as g2a_utils
 from util import get_logger, setup_logger
 from util import mail as mail_utils
 
@@ -48,14 +47,8 @@ class GrokModelProvider(ModelProvider):
     def __init__(
         self,
         browser_proxy="",
-        api_endpoint="",
-        api_token="",
-        api_append=True,
     ):
         self._browser_proxy = str(browser_proxy or "").strip()
-        self._api_endpoint = str(api_endpoint or "").strip()
-        self._api_token = str(api_token or "").strip()
-        self._api_append = bool(api_append)
 
     def oauth_enabled(self) -> bool:
         return False
@@ -74,15 +67,6 @@ class GrokModelProvider(ModelProvider):
 
     def browser_proxy(self):
         return self._browser_proxy
-
-    def api_endpoint(self):
-        return self._api_endpoint
-
-    def api_token(self):
-        return self._api_token
-
-    def api_append(self):
-        return self._api_append
 
     def run_batch(
         self,
@@ -106,8 +90,9 @@ class GrokModelProvider(ModelProvider):
         output_path = _default_sso_file(config)
         logger.info("开始执行内置 Grok 注册流程: total={}", total_accounts)
         logger.info("SSO 输出文件: {}", output_path)
-        if cpa_utils.should_upload(config):
-            logger.warning("当前流程为 grok，暂不支持 CPA 上传，待接入 grok2ai")
+        g2a_ok, g2a_msg = g2a_utils.validate_g2a_config(config)
+        if not g2a_ok:
+            logger.warning("G2A 配置不完整: {}", g2a_msg)
         _run_loop(total_accounts=total_accounts, output_path=output_path)
 
 
@@ -944,74 +929,6 @@ def append_sso_to_txt(sso_value, output_path):
     logger.info("已追加写入 sso 到文件: {}", output_path)
 
 
-def push_sso_to_api(new_tokens):
-    provider_cfg = _get_provider_cfg()
-    endpoint = str(provider_cfg.get("api_endpoint") or "").strip()
-    api_token = str(provider_cfg.get("api_token") or "").strip()
-    append_mode = bool(provider_cfg.get("api_append", True))
-    if not endpoint or not api_token:
-        return
-    headers = {
-        "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/json",
-    }
-    tokens_to_push = [t for t in new_tokens if t]
-    if append_mode:
-        try:
-            get_resp = requests.get(endpoint, headers=headers, timeout=15, verify=False)
-            if get_resp.status_code == 200:
-                data = get_resp.json()
-                if isinstance(data, dict) and isinstance(data.get("tokens"), dict):
-                    existing = data["tokens"].get("ssoBasic", [])
-                else:
-                    existing = (
-                        data.get("ssoBasic", []) if isinstance(data, dict) else []
-                    )
-                existing_tokens = [
-                    item["token"] if isinstance(item, dict) else str(item)
-                    for item in existing
-                    if item
-                ]
-                seen = set()
-                deduped = []
-                for token in existing_tokens + tokens_to_push:
-                    if token not in seen:
-                        seen.add(token)
-                        deduped.append(token)
-                tokens_to_push = deduped
-            else:
-                logger.error(
-                    "查询线上 token 失败: HTTP {}，放弃推送以保护存量数据",
-                    get_resp.status_code,
-                )
-                return
-        except Exception as exc:
-            logger.error("查询线上 token 异常: {}，放弃推送以保护存量数据", exc)
-            return
-    try:
-        resp = requests.post(
-            endpoint,
-            json={"ssoBasic": tokens_to_push},
-            headers=headers,
-            timeout=60,
-            verify=False,
-        )
-        if resp.status_code == 200:
-            logger.info(
-                "SSO token 已推送到 API（共 {} 个）: {}",
-                len(tokens_to_push),
-                endpoint,
-            )
-        else:
-            logger.warning(
-                "推送 API 返回异常: HTTP {} {}",
-                resp.status_code,
-                resp.text[:200],
-            )
-    except Exception as exc:
-        logger.warning("推送 API 失败: {}", exc)
-
-
 def run_single_registration(output_path, extract_numbers=False):
     run_stage("打开注册页", open_signup_page)
     email, dev_token = run_stage("提交邮箱", fill_email_and_submit)
@@ -1064,9 +981,14 @@ def _run_loop(total_accounts, output_path, extract_numbers=False):
             if total_accounts == 0 or current_round < total_accounts:
                 time.sleep(2)
     finally:
-        if collected_sso:
+        if collected_sso and g2a_utils.should_upload(_get_config()):
             logger.info("准备推送 {} 个 token 到 API...", len(collected_sso))
-            push_sso_to_api(collected_sso)
+            g2a_utils.upload_sso_tokens(
+                collected_sso,
+                _get_config(),
+                proxy=str(_get_config().get("proxy") or ""),
+                logger=logger.info,
+            )
         stop_browser()
 
 
@@ -1075,9 +997,6 @@ def run_batch(total_accounts=None, max_workers=None, proxy=None):
     provider_cfg = ((config or {}).get("model_providers") or {}).get("grok") or {}
     provider = GrokModelProvider(
         browser_proxy=provider_cfg.get("browser_proxy"),
-        api_endpoint=provider_cfg.get("api_endpoint"),
-        api_token=provider_cfg.get("api_token"),
-        api_append=provider_cfg.get("api_append", True),
     )
     return provider.run_batch(
         total_accounts=total_accounts, max_workers=max_workers, proxy=proxy

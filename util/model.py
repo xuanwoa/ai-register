@@ -51,9 +51,6 @@ def create_model_provider(config):
     if provider_name == "grok":
         return provider_cls(
             browser_proxy=provider_cfg.get("browser_proxy"),
-            api_endpoint=provider_cfg.get("api_endpoint"),
-            api_token=provider_cfg.get("api_token"),
-            api_append=provider_cfg.get("api_append", True),
         )
 
     raise ModelProviderError(f"provider 初始化未实现: {provider_name}")
