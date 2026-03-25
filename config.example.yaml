@@ -1,0 +1,37 @@
+# 并发
+concurrency: 1
+# 一批注册账号数
+total_accounts: 1
+# 代理（国外)
+proxy: "http://127.0.0.1:7890"
+# 注册成功账号保存路径
+token_dir: "~/.ai-register/token_dir"
+
+model_provider: "openai"  # 可选，与 model_providers 一致
+model_providers:
+  openai:
+    # 一般不修改
+    enable_oauth: true
+    oauth_required: true
+    oauth_issuer: "https://auth.openai.com"
+    oauth_client_id: "app_EMoamEEZ73f0CkXaXp7hrann"
+    oauth_redirect_uri: "http://localhost:1455/auth/callback"
+
+mail_provider: "tempmail"  # 可选，与 mail_providers 一致
+mail_providers:
+  duckmail:
+    # 见：https://www.duckmail.sbs/cn/api-docs
+    api_base: "https://api.duckmail.sbs"
+    bearer: "<YOUR_DUCKMAIL_BEARER>"
+  tempmail:
+    # 见：https://tempmail.lol/cn/api
+    proxy: "http://127.0.0.1:7890"
+    api_key: "<YOUR_TEMPMAIL_API_KEY>"
+    domain: ""
+    prefix: ""
+
+cpa:
+  # 是否上传到 CPA 见：https://github.com/router-for-me/CLIProxyAPI
+  enable: false
+  api_url: "http://localhost:8317/v0/management/auth-files"
+  token: "<YOUR_CPA_TOKEN>"
