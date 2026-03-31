@@ -47,7 +47,7 @@ def upload_sso_tokens(tokens, config, proxy=None, logger=None):
 
     session = requests.Session()
     host = (urlparse(api_url).hostname or "").lower()
-    final_use_proxy = bool(proxy) and (bool(use_proxy_pref) or host not in {"localhost", "127.0.0.1", "::1"})
+    final_use_proxy = bool(proxy) and bool(use_proxy_pref)
     if final_use_proxy:
         resolved_proxy = str(proxy)
         session.proxies = {"http": resolved_proxy, "https": resolved_proxy}

@@ -39,7 +39,7 @@ def upload_token_json(filepath, upload_api_url, upload_api_token="", proxy=None,
         filename = os.path.basename(filepath)
         session = requests.Session()
         host = (urlparse(upload_api_url).hostname or "").lower()
-        use_proxy = bool(proxy) and (force_use_proxy or host not in {"localhost", "127.0.0.1", "::1"})
+        use_proxy = bool(proxy) and force_use_proxy
         if use_proxy:
             session.proxies = {"http": proxy, "https": proxy}
         elif proxy and logger:
