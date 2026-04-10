@@ -93,7 +93,7 @@ def upload_sso_tokens(tokens, config, proxy=None, logger=None):
     try:
         resp = session.post(
             api_url,
-            json={"ssoBasic": tokens_to_push},
+            json={"pool": "auto", "tokens": tokens_to_push},
             headers=headers,
             timeout=60,
             verify=False,
