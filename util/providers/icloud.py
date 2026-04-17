@@ -313,10 +313,18 @@ class IcloudAliasManager:
 
 
 class RobustIcloudMailbox:
-    def __init__(self, manager: IcloudAliasManager):
+    def __init__(
+        self,
+        manager: IcloudAliasManager,
+        *,
+        strict_recipient_match: bool = True,
+        allow_verification_fallback: bool = False,
+    ):
         self.username, self.password = manager.get_imap_credentials()
         self.host = "imap.mail.me.com"
         self.folders = ["INBOX", "Junk"]
+        self.strict_recipient_match = bool(strict_recipient_match)
+        self.allow_verification_fallback = bool(allow_verification_fallback)
 
     def _connect(self):
         logger.info("连接 iCloud IMAP | host={} | user={}", self.host, self.username)
@@ -441,6 +449,50 @@ class RobustIcloudMailbox:
         )
         return has_keyword or has_code
 
+    @staticmethod
+    def _extract_emails(value: str):
+        if not value:
+            return set()
+        return {
+            m.group(1).strip().lower()
+            for m in re.finditer(r"([a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,})", str(value), re.IGNORECASE)
+            if m and m.group(1)
+        }
+
+    def _match_recipient_hint(self, parsed: dict, hint: str) -> bool:
+        if not hint:
+            return True
+        if not isinstance(parsed, dict):
+            return False
+
+        normalized_hint = str(hint or "").strip().lower()
+        if not normalized_hint:
+            return True
+
+        if self.strict_recipient_match:
+            header_values = [
+                str(parsed.get("to") or ""),
+                str(parsed.get("cc") or ""),
+                str(parsed.get("delivered_to") or ""),
+                str(parsed.get("original_to") or ""),
+            ]
+            header_emails = set()
+            for item in header_values:
+                header_emails.update(self._extract_emails(item))
+            return normalized_hint in header_emails
+
+        recipients = " ".join(
+            [
+                str(parsed.get("to") or ""),
+                str(parsed.get("cc") or ""),
+                str(parsed.get("delivered_to") or ""),
+                str(parsed.get("original_to") or ""),
+                str(parsed.get("text") or "")[:200],
+                str(parsed.get("html") or "")[:200],
+            ]
+        ).lower()
+        return normalized_hint in recipients
+
     def fetch_recent_messages(self, before_ids=None, recipient_hint=None, max_per_folder=60):
         before = set(str(x) for x in (before_ids or set()))
         hint = str(recipient_hint or "").strip().lower()
@@ -483,29 +535,19 @@ class RobustIcloudMailbox:
                     if not isinstance(parsed, dict):
                         continue
 
-                    if hint:
-                        recipients = " ".join(
-                            [
-                                str(parsed.get("to") or ""),
-                                str(parsed.get("cc") or ""),
-                                str(parsed.get("delivered_to") or ""),
-                                str(parsed.get("original_to") or ""),
-                                str(parsed.get("text") or "")[:200],
-                                str(parsed.get("html") or "")[:200],
-                            ]
-                        ).lower()
-                        if hint not in recipients:
-                            if not self._looks_like_verification_email(parsed):
-                                filtered_by_hint += 1
-                                continue
+                    if hint and (not self._match_recipient_hint(parsed, hint)):
+                        if self.allow_verification_fallback and self._looks_like_verification_email(parsed):
                             fallback_by_verification += 1
                             logger.warning(
-                                "recipient_hint 未命中但疑似验证码邮件，已放行 | hint={} | msg_id={} | subject={} | from={}",
+                                "recipient_hint 未命中，但已启用验证码兜底放行 | hint={} | msg_id={} | subject={} | from={}",
                                 hint,
                                 parsed.get("id") or "",
                                 parsed.get("subject") or "",
                                 parsed.get("from") or "",
                             )
+                        else:
+                            filtered_by_hint += 1
+                            continue
 
                     out.append(parsed)
                     scanned += 1
@@ -542,6 +584,8 @@ class IcloudMailProvider(MailProvider):
         aliases=None,
         aliases_file=None,
         state_dir=None,
+        strict_recipient_match=True,
+        allow_verification_fallback=False,
         **kwargs,
     ):
         _ = kwargs
@@ -552,7 +596,11 @@ class IcloudMailProvider(MailProvider):
             aliases_file=aliases_file,
             state_dir=state_dir,
         )
-        self.mailbox = RobustIcloudMailbox(self.manager)
+        self.mailbox = RobustIcloudMailbox(
+            self.manager,
+            strict_recipient_match=strict_recipient_match,
+            allow_verification_fallback=allow_verification_fallback,
+        )
 
     def create_temp_email(self):
         alias = self.manager.get_next_alias()
@@ -613,10 +661,11 @@ class IcloudMailProvider(MailProvider):
         if not content:
             return None
 
-        # 与 register/grok/grok.py 保持一致：优先匹配 xAI 常见 3-3 验证码，再匹配 6 位数字。
+        # 优先匹配 xAI 常见 3-3 验证码，再匹配 6 位数字。
+        # 注意：3-3 模式必须保持大小写敏感，避免把 HTML/CSS 片段（如 font-family）误识别为验证码。
         patterns = [
             r"(?<![A-Z0-9-])([A-Z0-9]{3}-[A-Z0-9]{3})(?![A-Z0-9-])",
-            r"(?:verification code|验证码|your code)[:\s]*[<>\s]*([A-Z0-9]{3}-[A-Z0-9]{3})\b",
+            r"(?i:(?:verification code|验证码|your code))[:\s]*[<>\s]*([A-Z0-9]{3}-[A-Z0-9]{3})\b",
             r"background-color:\s*#F3F3F3[^>]*>[\s\S]*?([A-Z0-9]{3}-[A-Z0-9]{3})[\s\S]*?</p>",
             r"Subject:.*?(\d{6})",
             r">\s*(\d{6})\s*<",
@@ -624,7 +673,7 @@ class IcloudMailProvider(MailProvider):
         ]
 
         for pattern in patterns:
-            m = re.search(pattern, content, re.IGNORECASE)
+            m = re.search(pattern, content)
             if not m:
                 continue
             code = str(m.group(1) or "").strip()
@@ -657,15 +706,14 @@ class IcloudMailProvider(MailProvider):
                 if msg_id:
                     seen.add(msg_id)
 
-                content = "\n".join(
-                    [
-                        str(msg.get("subject") or ""),
-                        str(msg.get("text") or ""),
-                        str(msg.get("html") or ""),
-                    ]
-                )
+                subject = str(msg.get("subject") or "")
+                text = str(msg.get("text") or "")
+                html = str(msg.get("html") or "")
 
-                code = self._extract_verification_code(content)
+                # 先扫 subject + text/plain，尽量避免 HTML 模板噪声抢先命中。
+                code = self._extract_verification_code("\n".join([subject, text]))
+                if not code and html:
+                    code = self._extract_verification_code(html)
                 if code:
                     normalized = code.replace("-", "")
                     if internal_logger:

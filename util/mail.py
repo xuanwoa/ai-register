@@ -76,6 +76,8 @@ def create_mail_provider(config, *, user_agent=None, proxy=None, impersonate="ch
             aliases=provider_cfg.get("aliases") or [],
             aliases_file=provider_cfg.get("aliases_file"),
             state_dir=provider_cfg.get("state_dir"),
+            strict_recipient_match=provider_cfg.get("strict_recipient_match", True),
+            allow_verification_fallback=provider_cfg.get("allow_verification_fallback", False),
         )
 
     raise MailProviderError(f"provider 初始化未实现: {provider_name}")

@@ -35,6 +35,10 @@ mail_providers:
     # iCloud IMAP 接码：主账号 + App 专用密码 + aliases 池
     imap_username: "main_account@icloud.com"
     app_password: "xxxx-xxxx-xxxx-xxxx"
+    # 默认严格按收件头（To/Cc/Delivered-To/X-Original-To）匹配当前 alias，避免跨 alias 误取验证码
+    strict_recipient_match: true
+    # 是否允许 recipient_hint 未命中时，按“疑似验证码邮件”兜底放行（默认关闭，建议保持 false）
+    allow_verification_fallback: false
     # 推荐：使用 aliases_file 按行读取（默认提供 data/icloud_aliases.txt）
     aliases: []
     aliases_file: "data/icloud_aliases.txt"
