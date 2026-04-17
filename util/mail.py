@@ -3,11 +3,13 @@ import time
 
 from util.providers.base import MailProviderError
 from util.providers.duckmail import DuckMailProvider
+from util.providers.icloud import IcloudMailProvider
 from util.providers.tempmail import TempMailLolProvider
 
 _PROVIDER_REGISTRY = {
     "duckmail": DuckMailProvider,
     "tempmail": TempMailLolProvider,
+    "icloud": IcloudMailProvider,
 }
 
 
@@ -67,6 +69,15 @@ def create_mail_provider(config, *, user_agent=None, proxy=None, impersonate="ch
             impersonate=impersonate,
         )
 
+    if provider_name == "icloud":
+        return provider_cls(
+            imap_username=provider_cfg.get("imap_username"),
+            app_password=provider_cfg.get("app_password"),
+            aliases=provider_cfg.get("aliases") or [],
+            aliases_file=provider_cfg.get("aliases_file"),
+            state_dir=provider_cfg.get("state_dir"),
+        )
+
     raise MailProviderError(f"provider 初始化未实现: {provider_name}")
 
 
@@ -82,6 +93,12 @@ def get_mail_provider_info(config):
         return {
             "name": provider_name,
             "api_base": "https://api.tempmail.lol/v2",
+        }
+
+    if provider_name == "icloud":
+        return {
+            "name": provider_name,
+            "api_base": "imap.mail.me.com:993",
         }
 
     return {"name": provider_name, "api_base": ""}
@@ -216,6 +233,7 @@ def wait_for_verification_email(
     logger=None,
     provider=None,
     config=None,
+    before_ids=None,
 ):
     """等待并提取 OpenAI 验证码。"""
     if not mail_token:
@@ -235,6 +253,17 @@ def wait_for_verification_email(
             )
 
     start_time = time.time()
+
+    provider_custom_wait = getattr(resolved, "wait_for_verification_email", None)
+    if callable(provider_custom_wait):
+        code = provider_custom_wait(
+            mail_token,
+            timeout=timeout,
+            before_ids=before_ids,
+            logger=logger,
+        )
+        if code:
+            return code
 
     while time.time() - start_time < timeout:
         messages = resolved.fetch_emails(mail_token)
@@ -282,3 +311,31 @@ def wait_for_verification_email(
         time.sleep(3)
 
     return None
+
+
+def get_current_ids(
+    mail_token=None,
+    provider=None,
+    config=None,
+    user_agent=None,
+    proxy=None,
+    impersonate="chrome131",
+):
+    resolved = provider
+    if resolved is None:
+        if config is None:
+            raise MailProviderError("get_current_ids 需要 provider 或 config")
+        resolved = create_mail_provider(
+            config,
+            user_agent=user_agent,
+            proxy=proxy,
+            impersonate=impersonate,
+        )
+
+    getter = getattr(resolved, "get_current_ids", None)
+    if callable(getter):
+        try:
+            return set(getter(mail_token=mail_token) or set())
+        except TypeError:
+            return set(getter() or set())
+    return set()

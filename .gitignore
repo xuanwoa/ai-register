@@ -164,3 +164,8 @@ cython_debug/
 .vscode/
 
 config.yaml
+
+# Runtime data / local sensitive files
+data/icloud_aliases.txt
+data/token_dir/
+token_dir/

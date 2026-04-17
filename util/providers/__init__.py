@@ -1,5 +1,12 @@
 from util.providers.base import MailProvider, MailProviderError
 from util.providers.duckmail import DuckMailProvider
+from util.providers.icloud import IcloudMailProvider
 from util.providers.tempmail import TempMailLolProvider
 
-__all__ = ["MailProvider", "MailProviderError", "DuckMailProvider", "TempMailLolProvider"]
+__all__ = [
+    "MailProvider",
+    "MailProviderError",
+    "DuckMailProvider",
+    "TempMailLolProvider",
+    "IcloudMailProvider",
+]

@@ -20,12 +20,25 @@ REGISTER_CONFIG_DEFAULTS = {
             "oauth_redirect_uri": "http://localhost:1455/auth/callback",
         },
     },
-    "mail_provider": "duckmail",
+    "mail_provider": "icloud",
     "mail_providers": {
         "duckmail": {
             "api_base": "https://api.duckmail.sbs",
             "bearer": "",
-        }
+        },
+        "tempmail": {
+            "proxy": "",
+            "api_key": "",
+            "domain": "",
+            "prefix": "",
+        },
+        "icloud": {
+            "imap_username": "",
+            "app_password": "",
+            "aliases": [],
+            "aliases_file": "data/icloud_aliases.txt",
+            "state_dir": "token_dir/icloud",
+        },
     },
     "proxy": "",
     "token_dir": "token_dir",

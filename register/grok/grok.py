@@ -171,6 +171,30 @@ def _default_sso_file(config):
     return os.path.join(sso_dir, f"sso_{ts}.txt")
 
 
+def _model_provider_name(config) -> str:
+    return str((config or {}).get("model_provider") or "grok").strip().lower()
+
+
+def _save_account_credentials(email: str, password: str):
+    normalized_email = str(email or "").strip()
+    normalized_password = str(password or "")
+    if not normalized_email or not normalized_password:
+        return
+
+    config = _get_config()
+    token_base = os.path.expanduser(str(config.get("token_dir") or "token_dir"))
+    root = (
+        token_base if os.path.isabs(token_base) else os.path.join(os.getcwd(), token_base)
+    )
+    token_dir = os.path.join(root, _model_provider_name(config))
+    os.makedirs(token_dir, exist_ok=True)
+
+    credential_path = os.path.join(token_dir, "accounts.txt")
+    with _file_lock:
+        with open(credential_path, "a", encoding="utf-8") as file:
+            file.write(f"{normalized_email}\t{normalized_password}\n")
+
+
 def get_page_diagnostics() -> str:
     try:
         info = page.run_js(
@@ -416,20 +440,16 @@ return true;
     raise Exception("未找到使用邮箱注册按钮")
 
 
-def fill_email_and_submit(timeout=15):
-    config = _get_config()
-    mail_provider = mail_utils.create_mail_provider(
-        config,
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        proxy=str(config.get("proxy") or ""),
-        impersonate="chrome131",
-    )
+def fill_email_and_submit(mail_provider, timeout=15):
     email, _password, dev_token = mail_provider.create_temp_email()
     if not email or not dev_token:
         raise Exception("获取邮箱失败")
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        filled = page.run_js(
+
+    submitted = False
+    try:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            filled = page.run_js(
             """
 const email = arguments[0];
 function isVisible(node) {
@@ -455,15 +475,21 @@ input.blur();
 return 'filled';
             """,
             email,
-        )
-        if filled == "not-ready":
-            time.sleep(0.5)
-            continue
-        if filled != "filled":
-            time.sleep(0.5)
-            continue
-        time.sleep(0.8)
-        clicked = page.run_js(r"""
+            )
+            if filled == "not-ready":
+                time.sleep(0.5)
+                continue
+            if filled != "filled":
+                time.sleep(0.5)
+                continue
+            time.sleep(0.8)
+            # 点击「注册/继续」前做邮箱快照，后续只解析增量邮件。
+            before_ids = mail_utils.get_current_ids(
+                mail_token=dev_token,
+                provider=mail_provider,
+            )
+
+            clicked = page.run_js(r"""
 function isVisible(node) {
     if (!node) return false;
     const style = window.getComputedStyle(node);
@@ -483,23 +509,32 @@ if (!submitButton || submitButton.disabled) return false;
 submitButton.click();
 return true;
         """)
-        if clicked:
-            logger.info("邮箱提交成功: {}", email)
-            return email, dev_token
-        time.sleep(0.5)
-    raise Exception("未找到邮箱输入框或注册按钮")
+            if clicked:
+                submitted = True
+                logger.info("邮箱提交成功: {}", email)
+                return email, dev_token, before_ids
+            time.sleep(0.5)
+        raise Exception("未找到邮箱输入框或注册按钮")
+    except Exception:
+        # 只要邮箱阶段未提交成功，就立即释放 alias，避免残留 in_use 占名额。
+        if email and (not submitted):
+            try:
+                if hasattr(mail_provider, "release_alias"):
+                    mail_provider.release_alias(email)
+                    logger.warning("邮箱提交失败，已释放 alias: {}", email)
+            except Exception as release_err:
+                logger.warning("邮箱提交失败后释放 alias 失败: {}", release_err)
+        raise
 
 
-def fill_code_and_submit(email, dev_token, timeout=120):
+def fill_code_and_submit(mail_provider, email, dev_token, before_ids=None, timeout=120):
     _ = email
-    config = _get_config()
-    mail_provider = mail_utils.create_mail_provider(
-        config,
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        proxy=str(config.get("proxy") or ""),
-        impersonate="chrome131",
+    code = wait_for_verification_code(
+        mail_provider,
+        dev_token,
+        timeout=timeout,
+        before_ids=before_ids,
     )
-    code = wait_for_verification_code(mail_provider, dev_token, timeout=timeout)
     if not code:
         raise Exception("获取验证码失败")
     deadline = time.time() + timeout
@@ -722,8 +757,26 @@ def extract_verification_code(content: str) -> Optional[str]:
 
 
 def wait_for_verification_code(
-    mail_provider, mail_token: str, timeout: int = 120
+    mail_provider,
+    mail_token: str,
+    timeout: int = 120,
+    before_ids=None,
 ) -> Optional[str]:
+    provider_custom_wait = getattr(mail_provider, "wait_for_verification_email", None)
+    if callable(provider_custom_wait):
+        logger.info("优先使用 provider 自定义验证码等待逻辑。")
+        code = provider_custom_wait(
+            mail_token,
+            timeout=timeout,
+            before_ids=before_ids,
+            logger=lambda msg: logger.info(msg),
+        )
+        if code:
+            normalized = str(code).replace("-", "")
+            logger.info("provider 自定义逻辑命中验证码: {}", normalized)
+            return normalized
+        logger.warning("provider 自定义验证码等待未命中，回退到通用扫描逻辑。")
+
     start = time.time()
     seen_ids = set()
     while time.time() - start < timeout:
@@ -733,6 +786,12 @@ def wait_for_verification_code(
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
+
+            msg_id = str(msg.get("id") or msg.get("@id") or "")
+            if msg_id and msg_id in seen_ids:
+                continue
+            if msg_id:
+                seen_ids.add(msg_id)
 
             direct_content = "\n".join(
                 [
@@ -747,11 +806,11 @@ def wait_for_verification_code(
                     logger.info("从邮件列表提取到验证码: {}", code)
                     return code.replace("-", "")
 
-            msg_id = msg.get("id") or msg.get("@id")
-            if not msg_id or msg_id in seen_ids:
+            raw_msg_id = msg.get("id") or msg.get("@id")
+            if not raw_msg_id:
                 continue
-            seen_ids.add(msg_id)
-            detail = mail_provider.fetch_email_detail(mail_token, str(msg_id))
+
+            detail = mail_provider.fetch_email_detail(mail_token, str(raw_msg_id))
             if not isinstance(detail, dict):
                 continue
             content = "\n".join(
@@ -994,24 +1053,59 @@ def append_sso_to_txt(sso_value, output_path):
 
 
 def run_single_registration(output_path, extract_numbers=False):
-    run_stage("打开注册页", open_signup_page)
-    email, dev_token = run_stage("提交邮箱", fill_email_and_submit)
-    run_stage("提交验证码", fill_code_and_submit, email, dev_token)
-    profile = run_stage("提交注册资料", fill_profile_and_submit)
-    sso_value = run_stage("获取 sso", wait_for_sso_cookie)
-    append_sso_to_txt(sso_value, output_path)
-    if extract_numbers:
-        extract_visible_numbers()
-    result = {"email": email, "sso": sso_value, **profile}
-    logger.info(
-        "注册成功 | email={} | password={} | given={} | family={}",
-        email,
-        profile.get("password", ""),
-        profile.get("given_name", ""),
-        profile.get("family_name", ""),
+    config = _get_config()
+    mail_provider = mail_utils.create_mail_provider(
+        config,
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        proxy=str(config.get("proxy") or ""),
+        impersonate="chrome131",
     )
-    logger.info("注册完成: {}", email)
-    return result
+
+    email = ""
+    profile = {}
+    alias_marked = False
+    try:
+        run_stage("打开注册页", open_signup_page)
+        email, dev_token, before_ids = run_stage(
+            "提交邮箱", fill_email_and_submit, mail_provider
+        )
+        run_stage(
+            "提交验证码",
+            fill_code_and_submit,
+            mail_provider,
+            email,
+            dev_token,
+            before_ids,
+        )
+        profile = run_stage("提交注册资料", fill_profile_and_submit)
+        sso_value = run_stage("获取 sso", wait_for_sso_cookie)
+        append_sso_to_txt(sso_value, output_path)
+        if extract_numbers:
+            extract_visible_numbers()
+
+        _save_account_credentials(email, profile.get("password", ""))
+        if hasattr(mail_provider, "mark_alias_registered"):
+            mail_provider.mark_alias_registered(email)
+            alias_marked = True
+
+        result = {"email": email, "sso": sso_value, **profile}
+        logger.info(
+            "注册成功 | email={} | password={} | given={} | family={}",
+            email,
+            profile.get("password", ""),
+            profile.get("given_name", ""),
+            profile.get("family_name", ""),
+        )
+        logger.info("注册完成: {}", email)
+        return result
+    except Exception:
+        if email and (not alias_marked):
+            try:
+                if hasattr(mail_provider, "release_alias"):
+                    mail_provider.release_alias(email)
+            except Exception as release_err:
+                logger.warning("释放邮箱别名失败: {}", release_err)
+        raise
 
 
 def load_run_count():

@@ -530,6 +530,27 @@ def _save_codex_tokens(email: str, tokens: Optional[dict[str, Any]]):
     )
 
 
+def _save_account_credentials(email: str, password: str):
+    normalized_email = str(email or "").strip()
+    normalized_password = str(password or "")
+    if not normalized_email or not normalized_password:
+        return
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    token_base = os.path.expanduser(_token_base_dir())
+    model_name = _model_provider_name()
+    root_dir = (
+        token_base if os.path.isabs(token_base) else os.path.join(base_dir, token_base)
+    )
+    token_dir = os.path.join(root_dir, model_name)
+    os.makedirs(token_dir, exist_ok=True)
+
+    credential_path = os.path.join(token_dir, "accounts.txt")
+    with _file_lock:
+        with open(credential_path, "a", encoding="utf-8") as f:
+            f.write(f"{normalized_email}\t{normalized_password}\n")
+
+
 def _generate_password(length=14):
     lower = string.ascii_lowercase
     upper = string.ascii_uppercase
@@ -667,13 +688,16 @@ class ChatGPTRegister:
         """从邮件内容提取 6 位验证码"""
         return mail_utils.extract_verification_code(email_content)
 
-    def wait_for_verification_email(self, mail_token: str, timeout: int = 120):
+    def wait_for_verification_email(
+        self, mail_token: str, timeout: int = 120, before_ids=None
+    ):
         """等待并提取 OpenAI 验证码"""
         self._print(f"[OTP] 等待验证码邮件 (最多 {timeout}s)...")
         code = mail_utils.wait_for_verification_email(
             mail_token=mail_token,
             timeout=timeout,
             provider=self.mail_provider,
+            before_ids=before_ids,
             logger=lambda msg: self._print(f"[OTP] {msg}"),
         )
         if code:
@@ -854,13 +878,19 @@ class ChatGPTRegister:
     # ==================== 自动注册主流程 ====================
 
     def run_register(self, email, password, name, birthdate, mail_token):
-        """使用 DuckMail 的注册流程"""
+        """通用邮箱 provider 的注册流程（支持 iCloud 快照增量接码）"""
         self.visit_homepage()
         _random_delay(0.3, 0.8)
         csrf = self.get_csrf()
         _random_delay(0.2, 0.5)
         auth_url = self.signin(email, csrf)
         _random_delay(0.3, 0.8)
+
+        # 在可能触发 OTP 的关键链路前先做历史快照，避免误读旧验证码。
+        otp_before_ids = mail_utils.get_current_ids(
+            mail_token=mail_token,
+            provider=self.mail_provider,
+        )
 
         final_url = self.authorize(auth_url)
         final_path = urlparse(final_url).path
@@ -878,6 +908,12 @@ class ChatGPTRegister:
                 raise Exception(f"Register 失败 ({status}): {data}")
             # register 之后可能还需要 send_otp（全新注册流程中 OTP 不一定在 authorize 时发送）
             _random_delay(0.3, 0.8)
+
+            # 精确到发送前一刻再次快照。
+            otp_before_ids = mail_utils.get_current_ids(
+                mail_token=mail_token,
+                provider=self.mail_provider,
+            )
             self.send_otp()
             need_otp = True
         elif "email-verification" in final_path or "email-otp" in final_path:
@@ -901,8 +937,10 @@ class ChatGPTRegister:
             need_otp = True
 
         if need_otp:
-            # 使用 DuckMail 等待验证码
-            otp_code = self.wait_for_verification_email(mail_token)
+            otp_code = self.wait_for_verification_email(
+                mail_token,
+                before_ids=otp_before_ids,
+            )
             if not otp_code:
                 raise Exception("未能获取验证码")
 
@@ -910,9 +948,18 @@ class ChatGPTRegister:
             status, data = self.validate_otp(otp_code)
             if status != 200:
                 self._print("验证码失败，重试...")
+
+                otp_before_ids = mail_utils.get_current_ids(
+                    mail_token=mail_token,
+                    provider=self.mail_provider,
+                )
                 self.send_otp()
                 _random_delay(1.0, 2.0)
-                otp_code = self.wait_for_verification_email(mail_token, timeout=60)
+                otp_code = self.wait_for_verification_email(
+                    mail_token,
+                    timeout=60,
+                    before_ids=otp_before_ids,
+                )
                 if not otp_code:
                     raise Exception("重试后仍未获取验证码")
                 _random_delay(0.3, 0.8)
@@ -1664,6 +1711,9 @@ class ChatGPTRegister:
 def _register_one(idx, total, proxy):
     """单个注册任务 (在线程中运行) - 使用 DuckMail 临时邮箱"""
     reg = None
+    email = ""
+    chatgpt_password = ""
+    alias_marked = False
     try:
         reg = ChatGPTRegister(proxy=proxy, tag=f"{idx}")
 
@@ -1710,10 +1760,23 @@ def _register_one(idx, total, proxy):
                     raise Exception(f"{msg}（oauth_required=true）")
                 reg._print(f"[OAuth] {msg}（按配置继续）")
 
+        _save_account_credentials(email, chatgpt_password)
+
+        if hasattr(reg.mail_provider, "mark_alias_registered"):
+            reg.mail_provider.mark_alias_registered(email)
+            alias_marked = True
+
         logger.success(f"[OK] [{tag}] {email} 注册成功!")
         return True, email, None
 
     except Exception as e:
+        if reg is not None and email and (not alias_marked):
+            try:
+                if hasattr(reg.mail_provider, "release_alias"):
+                    reg.mail_provider.release_alias(email)
+            except Exception as release_err:
+                logger.warning(f"[{idx}] 释放邮箱别名失败: {release_err}")
+
         error_msg = str(e)
         logger.error(f"[FAIL] [{idx}] 注册失败: {error_msg}")
         logger.opt(exception=True).debug("注册任务异常堆栈")

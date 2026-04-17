@@ -21,3 +21,19 @@ class MailProvider(ABC):
     @abstractmethod
     def fetch_email_detail(self, mail_token, msg_id):
         """获取单封邮件详情。"""
+
+    def get_current_ids(self, mail_token=None):
+        """可选：在触发发码前抓取邮箱快照 ID 集合。"""
+        _ = mail_token
+        return set()
+
+    def wait_for_verification_email(
+        self,
+        mail_token,
+        timeout=120,
+        before_ids=None,
+        logger=None,
+    ):
+        """可选：provider 自定义的验证码等待逻辑。"""
+        _ = (mail_token, timeout, before_ids, logger)
+        return None
